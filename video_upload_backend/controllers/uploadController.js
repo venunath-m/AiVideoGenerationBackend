@@ -111,20 +111,73 @@ function safeUnlink(file) {
   }
 }
 
-// ✅ Updated cinematic highlight generator with logs
+// ✅ Updated cinematic highlight generator with logo + text watermark
 async function generateCinematicHighlight(videoPath, outputPath) {
   const uploadDir = path.dirname(outputPath);
   const videoDuration = await getVideoDuration(videoPath);
   console.log("🎥 Video duration:", videoDuration, "seconds");
 
+  const MAX_HIGHLIGHT = 60; // seconds
+  const MIN_BUFFER = 3;     // tolerance
+
+  // Paths for watermark assets
+  const logoPath = path.join(__dirname, "../assets/logo.png"); // make sure logo exists
+  const watermarkText = "SafaNaga.ai"; // customize text watermark
+
+  // ⚡ Skip trimming if already short
+  if (videoDuration <= MAX_HIGHLIGHT + MIN_BUFFER) {
+    console.log("✅ Short video, skipping trimming. Beautifying + watermarking only...");
+
+    const beautified = path.join(uploadDir, `beautified_${Date.now()}.mp4`);
+    await runFFmpegJob([
+      "-y",
+      "-i", videoPath,      // main video
+      "-i", logoPath,       // logo input
+      "-filter_complex", `
+        [0:v]scale=1080:1920:force_original_aspect_ratio=increase,
+        crop=1080:1920,
+        eq=brightness=0.05:contrast=1.2:saturation=1.15,
+        unsharp=5:5:1.0:5:5:0.0[vid];
+        [1:v]scale=150:-1[logo];
+        [vid][logo]overlay=main_w-overlay_w-20:20,
+        drawtext=fontfile='C\\:/Windows/Fonts/arial.ttf':text='${watermarkText}':fontcolor=white:fontsize=36:alpha=0.7:x=20:y=main_h-60
+      `,
+      "-c:v", "libx264",
+      "-preset", "fast",
+      "-b:v", "5M",
+      "-c:a", "aac",
+      "-b:a", "128k",
+      beautified
+    ]);
+
+    // Add music if available
+    const musicPath = pickRandomMusic();
+    if (musicPath) {
+      const finalWithMusic = path.join(uploadDir, `highlight_${Date.now()}.mp4`);
+      await runFFmpegJob([
+        "-y",
+        "-i", beautified,
+        "-i", musicPath,
+        "-c:v", "copy",
+        "-filter_complex", "[0:a][1:a]amix=inputs=2:duration=shortest",
+        "-c:a", "aac",
+        "-b:a", "128k",
+        finalWithMusic
+      ]);
+      safeUnlink(beautified);
+      return finalWithMusic;
+    }
+    return beautified;
+  }
+
+  // ⚡ Otherwise → motion-based trimming & merging
   let motionTimes = await detectMotionSegments(videoPath);
   console.log("📊 Raw motion timestamps:", motionTimes);
 
-  // 🌀 Deduplicate close timestamps (<1s apart)
+  // Deduplicate close timestamps (<1s apart)
   motionTimes = motionTimes.filter((t, i, arr) => i === 0 || t - arr[i - 1] > 1);
   console.log("🌀 Deduped motion timestamps:", motionTimes);
 
-  // If no motion → fallback to whole video
   if (!motionTimes.length || motionTimes.length < 2) {
     motionTimes = [0, videoDuration];
     console.log("⚠️ No motion found → using full video");
@@ -132,15 +185,12 @@ async function generateCinematicHighlight(videoPath, outputPath) {
     motionTimes = [0, ...motionTimes, videoDuration];
   }
 
-  // ⏱ Limit total highlight duration
-  const MAX_HIGHLIGHT = 60; // seconds
   let total = 0;
   const segments = [];
-
   for (let i = 0; i < motionTimes.length - 1; i++) {
     const start = motionTimes[i];
     let duration = motionTimes[i + 1] - start;
-    duration = Math.max(Math.min(duration, 5), 1); // min 1s, max 5s
+    duration = Math.max(Math.min(duration, 5), 1);
 
     if (total + duration > MAX_HIGHLIGHT) {
       console.log("⏹ Stopping, max highlight reached at", total, "seconds");
@@ -160,23 +210,25 @@ async function generateCinematicHighlight(videoPath, outputPath) {
     const tempPath = path.join(uploadDir, `seg_${i}_${Date.now()}.mp4`);
     const speedFilter = `setpts=${1 / seg.speed}*PTS`;
 
-    const filters = [
-      "scale=1080:1920:force_original_aspect_ratio=increase",
-      "crop=1080:1920",
-      "eq=brightness=0.05:contrast=1.2:saturation=1.15",
-      "unsharp=5:5:1.0:5:5:0.0",
-      speedFilter,
-      "format=yuv420p"
-    ];
-
-    console.log("⚙️ Running FFmpeg for segment", i, "→", tempPath);
+    // Apply filters + logo + text
+    const filterComplex = `
+      [0:v]scale=1080:1920:force_original_aspect_ratio=increase,
+      crop=1080:1920,
+      eq=brightness=0.05:contrast=1.2:saturation=1.15,
+      unsharp=5:5:1.0:5:5:0.0,
+      ${speedFilter}[vid];
+      [1:v]scale=150:-1[logo];
+      [vid][logo]overlay=main_w-overlay_w-20:20,
+      drawtext=fontfile='C\\:/Windows/Fonts/arial.ttf':text='${watermarkText}':fontcolor=white:fontsize=36:alpha=0.7:x=20:y=main_h-60
+    `;
 
     await runFFmpegJob([
       "-y",
       "-i", videoPath,
+      "-i", logoPath,
       "-ss", seg.start.toString(),
       "-t", seg.duration.toString(),
-      "-vf", filters.join(","),
+      "-filter_complex", filterComplex,
       "-c:v", "libx264",
       "-preset", "fast",
       "-b:v", "5M",
@@ -188,7 +240,7 @@ async function generateCinematicHighlight(videoPath, outputPath) {
     tempFiles.push(tempPath);
   }
 
-  // Merge segments with transitions
+  // Merge with transitions
   let mergedSegments = [...tempFiles];
   while (mergedSegments.length > 1) {
     const batchMerged = [];
@@ -197,15 +249,11 @@ async function generateCinematicHighlight(videoPath, outputPath) {
         batchMerged.push(mergedSegments[i]);
         continue;
       }
-
       const outPath = path.join(uploadDir, `merged_${Date.now()}_${i}.mp4`);
       const seg1Duration = Math.max(1, segments[i].duration);
       const seg2Duration = Math.max(1, segments[i + 1].duration);
-
       const transitionType = Math.min(seg1Duration, seg2Duration) < 2 ? "fade" : randomTransition();
       const offset = Math.min(seg1Duration, seg2Duration) - 0.1;
-
-      console.log(`🔗 Merging segments ${i} & ${i + 1} with transition=${transitionType}, offset=${offset}s`);
 
       const filterComplex = `[0:v][1:v]xfade=transition=${transitionType}:duration=0.8:offset=${offset}[v];[0:a][1:a]acrossfade=d=0.8[a]`;
 
@@ -232,12 +280,10 @@ async function generateCinematicHighlight(videoPath, outputPath) {
   }
 
   let finalPath = mergedSegments[0];
-  console.log("✅ Segments merged into:", finalPath);
 
-  // Optional: add random music
+  // Add music
   const musicPath = pickRandomMusic();
   if (musicPath) {
-    console.log("🎵 Adding background music:", musicPath);
     const finalWithMusic = path.join(uploadDir, `highlight_${Date.now()}.mp4`);
     await runFFmpegJob([
       "-y",
@@ -251,11 +297,8 @@ async function generateCinematicHighlight(videoPath, outputPath) {
     ]);
     safeUnlink(finalPath);
     finalPath = finalWithMusic;
-  } else {
-    console.log("🎵 No music found, skipping");
   }
 
-  console.log("🏁 Final cinematic highlight generated:", finalPath);
   return finalPath;
 }
 
@@ -269,7 +312,6 @@ exports.uploadVideo = async (req, res) => {
     const host = req.get("host");
     const uploadDir = path.dirname(files[0].path);
 
-    // Convert & make safe names
     const mp4Paths = [];
     for (const file of files) {
       const safePath = path.join(uploadDir, makeSafeFileName(file.originalname));
@@ -278,7 +320,6 @@ exports.uploadVideo = async (req, res) => {
       mp4Paths.push(safePath);
     }
 
-    // Merge if multiple files
     let finalVideoPath = mp4Paths[0];
     if (mp4Paths.length > 1) {
       finalVideoPath = path.join(uploadDir, `merged_${Date.now()}.mp4`);
@@ -286,14 +327,13 @@ exports.uploadVideo = async (req, res) => {
       mp4Paths.forEach(p => fs.unlinkSync(p));
     }
 
-    // Generate cinematic highlight reel
     const highlightPath = path.join(uploadDir, `highlight_${Date.now()}.mp4`);
-    await generateCinematicHighlight(finalVideoPath, highlightPath);
+    const cinematicPath = await generateCinematicHighlight(finalVideoPath, highlightPath);
 
     res.status(200).json({
       message: "Video uploaded & cinematic highlight reel generated successfully",
       original: `/uploads/${path.basename(finalVideoPath)}`,
-      highlight: `http://${host}/${highlightPath.replace(/\\/g, "/")}`
+      highlight: `http://${host}/${cinematicPath.replace(/\\/g, "/")}`
     });
 
   } catch (err) {
