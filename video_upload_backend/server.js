@@ -3,7 +3,6 @@ const cors = require("cors");
 const fs = require("fs");
 const http = require("http");
 const { Server } = require("socket.io");
-
 const uploadRoutes = require("./routes/uploadRoutes");
 const eventRoutes = require("./routes/eventRoutes");
 
@@ -19,13 +18,8 @@ app.use("/uploads", express.static("uploads"));
 app.use("/api/videos", uploadRoutes);
 app.use("/api/videos", eventRoutes);
 
-// Wrap app with http server
 const server = http.createServer(app);
-
-// Initialize Socket.IO
 const io = new Server(server, { cors: { origin: "*" } });
-
-// Make io globally accessible in routes
 app.set("io", io);
 
 io.on("connection", (socket) => {
@@ -33,6 +27,4 @@ io.on("connection", (socket) => {
   socket.on("disconnect", () => console.log("Client disconnected:", socket.id));
 });
 
-server.listen(PORT, () =>
-  console.log(`Server running on http://localhost:${PORT}`)
-);
+server.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
