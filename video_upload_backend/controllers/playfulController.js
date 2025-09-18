@@ -2,8 +2,8 @@ const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
 const { generateImageFromPrompt } = require("./aiImageService");
+const slugify = require("slugify");
 
-// --- Utilities ---
 const ensureDirExists = (dir) => {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 };
@@ -16,6 +16,54 @@ const getRandomMusic = () => {
   return path.join(musicDir, files[Math.floor(Math.random() * files.length)]);
 };
 
+// --- Zoom video generation (single filter, no filter_complex) ---
+function generateZoomVideo(imagePath, outputPath, zoom = 1.5, duration = 10, fps = 25) {
+  return new Promise((resolve, reject) => {
+    const zoomFilter = `zoompan=z='if(lte(on,${fps*duration}),(on/${fps*duration})*${zoom}+1,${zoom})':d=${fps}:fps=${fps}:s=1920x1080`;
+
+    const ffmpegArgs = [
+      "-y",
+      "-loop", "1",
+      "-i", imagePath,
+      "-vf", zoomFilter,
+      "-t", duration.toString(),
+      "-c:v", "libx264",
+      "-pix_fmt", "yuv420p",
+      outputPath
+    ];
+
+    const ffmpeg = spawn("ffmpeg", ffmpegArgs, { shell: true });
+
+    ffmpeg.stderr.on("data", (data) => console.log("[FFmpeg]", data.toString()));
+    ffmpeg.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error("FFmpeg failed with code " + code));
+    });
+  });
+}
+
+// --- Overlay text on video ---
+function overlayTextOnVideo(videoPath, outputPath, text, fontPath) {
+  return new Promise((resolve, reject) => {
+    const ffmpegArgs = [
+      "-y",
+      "-i", videoPath,
+      "-vf", `drawtext=text='${text}':fontfile='${fontPath.replace(/\\/g, '/')}'` +
+             `:fontsize=40:fontcolor=yellow:x=(w-text_w)/2:y=(h-text_h)/2`,
+      "-c:v", "libx264",
+      "-pix_fmt", "yuv420p",
+      outputPath
+    ];
+
+    const ffmpeg = spawn("ffmpeg", ffmpegArgs, { shell: true });
+    ffmpeg.stderr.on("data", (data) => console.log("[FFmpeg]", data.toString()));
+    ffmpeg.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error("FFmpeg failed with code " + code));
+    });
+  });
+}
+
 // --- Main function ---
 exports.generatePlayfulVideo = async (req, res) => {
   try {
@@ -27,57 +75,53 @@ exports.generatePlayfulVideo = async (req, res) => {
     const tempDir = path.join(__dirname, "../uploads/temp");
     ensureDirExists(tempDir);
 
-    // 1️⃣ Generate AI image
     const imagePath = path.join(tempDir, `bg_${Date.now()}.png`);
     console.log("Generating AI image...");
     await generateImageFromPrompt(prompt, imagePath);
     console.log("AI image saved:", imagePath);
 
-    // 2️⃣ Prepare output and music
-    const outputPath = path.join(uploadDir, `playful_${Date.now()}.mp4`);
+    const rawTitle = "playful_video";
+    let safeTitle = slugify(rawTitle, { lower: true, strict: true });
+    if (!safeTitle) safeTitle = "playful_video";
+
+    const zoomVideoPath = path.join(tempDir, `${safeTitle}_zoom_${Date.now()}.mp4`);
+    const finalVideoPath = path.join(uploadDir, `${safeTitle}_final_${Date.now()}.mp4`);
+
     const music = getRandomMusic();
     if (!music) return res.status(500).json({ error: "No music available" });
 
-    const fontPath = "C:/Windows/Fonts/arial.ttf";
+    // 1️⃣ Generate zoom video
+    await generateZoomVideo(imagePath, zoomVideoPath, 1.2, 10, 25);
 
-    // 3️⃣ Windows-safe drawtext with line breaks
-    const maxCharsPerLine = 25; // adjust as needed
-    const wrappedText = prompt.match(new RegExp(`.{1,${maxCharsPerLine}}`, "g")).join("\\n");
+    // 2️⃣ Overlay text (optional)
+    const wrappedText = prompt.match(/.{1,25}/g).join("\\n");
+    const fontPath = path.join(__dirname, "../assets/fonts/NotoSans-Regular.ttf");
+    await overlayTextOnVideo(zoomVideoPath, finalVideoPath, wrappedText, fontPath);
 
-    // 4️⃣ FFmpeg filter string (Windows-safe)
-    const vfArg = `zoompan=z=min(zoom+0.0015\\,1.1):d=125,drawtext=text=${wrappedText}:fontfile=${fontPath}:fontcolor=yellow:fontsize=40:x=(w-text_w)/2:y=(h-text_h)/2`;
-
-    const args = [
+    // 3️⃣ Add music
+    const ffmpegArgs = [
       "-y",
-      "-loop", "1",
-      "-i", imagePath,
+      "-i", finalVideoPath,
       "-i", music,
-      "-t", "10",
-      "-vf", vfArg,
-      "-shortest",
-      "-c:v", "libx264",
+      "-c:v", "copy",
       "-c:a", "aac",
-      outputPath
+      "-shortest",
+      finalVideoPath
     ];
 
-    console.log("FFmpeg args:", args);
-    const io = req.app.get("io");
-    io.emit("videoStage", { stage: "🎬 Starting video generation..." });
-
-    // 5️⃣ Spawn FFmpeg
-    const ffmpeg = spawn("ffmpeg", args, { shell: true });
-    ffmpeg.stderr.on("data", (data) => console.log("[FFmpeg]", data.toString()));
-    ffmpeg.on("close", (code) => {
-      console.log("FFmpeg process exited with code", code);
-      if (code !== 0) return res.status(500).json({ error: "Failed to generate video" });
-
-      io.emit("videoStage", { stage: "✅ Video ready!" });
-      io.emit("videoCompleted", { prompt, output: `/uploads/playful/${path.basename(outputPath)}` });
-      res.json({ message: "Playful video generated", output: `/uploads/playful/${path.basename(outputPath)}` });
+    await new Promise((resolve, reject) => {
+      const ffmpeg = spawn("ffmpeg", ffmpegArgs, { shell: true });
+      ffmpeg.stderr.on("data", (data) => console.log("[FFmpeg]", data.toString()));
+      ffmpeg.on("close", (code) => (code === 0 ? resolve() : reject(new Error("FFmpeg failed adding music"))));
     });
+
+    const io = req.app.get("io");
+    io.emit("videoStage", { stage: "✅ Video ready!" });
+    io.emit("videoCompleted", { prompt, output: `/uploads/playful/${path.basename(finalVideoPath)}` });
+    res.json({ message: "Playful video generated", output: `/uploads/playful/${path.basename(finalVideoPath)}` });
 
   } catch (err) {
     console.error("Server error:", err);
-    res.status(500).json({ error: "Server error" });
+    res.status(500).json({ error: "Server error", details: err.message });
   }
 };
