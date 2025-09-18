@@ -281,47 +281,53 @@ async function generateCinematicHighlight(videoPath, outputPath) {
     const logoPath = path.join(__dirname, "../assets/logo.png");
     const watermarkText = "SafaNaga.ai";
 
-    // Motion-based segment detection
+    // --- Detect motion/action segments ---
     let motionTimes = await detectMotionSegmentsEfficient(videoPath);
 
-    // Fallback if motion detection fails
+    // Fallback if detection fails
     if (!motionTimes || motionTimes.length < 2) {
         motionTimes = Array.from({ length: 10 }, (_, i) => i * (videoDuration / 10));
     }
 
-    // Ensure start and end points
+    // Ensure start & end
     motionTimes = [0, ...motionTimes, videoDuration];
 
-    const segments = [];
-    const MAX_HIGHLIGHT = Math.min(videoDuration, 60); // max 60s highlight
-
-    // Dynamic segment duration rules
-    const MIN_SEG_DURATION = videoDuration < 20 ? 2 : 1; // short videos: min 2s
-    const MAX_SEG_DURATION = Math.max(4, videoDuration * 0.25); // allow up to 25% of video per segment, min 4s
-
-    let total = 0;
-
+    // --- Convert to segments ---
+    let segments = [];
     for (let i = 0; i < motionTimes.length - 1; i++) {
         const start = motionTimes[i];
-        let duration = motionTimes[i + 1] - start;
-
-        // Clamp segment duration
-        duration = Math.min(Math.max(duration, MIN_SEG_DURATION), MAX_SEG_DURATION);
-
-        // Stop if we exceed max highlight duration
-        if (total + duration > MAX_HIGHLIGHT) break;
-
-        // Speed adjustment: speed up long segments slightly
-        const speed = duration > 8 ? 2 : 1;
-
-        segments.push({ start, duration, speed });
-        total += duration;
+        const duration = motionTimes[i + 1] - start;
+        if (duration >= 1.0) { // skip micro fragments
+            segments.push({ start, duration });
+        }
     }
 
-    const tempFiles = [];
+    // --- Sort by action priority (longer = more likely intense) ---
+    segments.sort((a, b) => b.duration - a.duration);
 
-    for (let i = 0; i < segments.length; i++) {
-        const seg = segments[i];
+    const MAX_HIGHLIGHT = 60; // total max highlight length
+    const selectedSegments = [];
+    let total = 0;
+
+    for (const seg of segments) {
+        if (total >= MAX_HIGHLIGHT) break;
+
+        let duration = Math.min(seg.duration, 8); // cap max segment length
+        if (total + duration > MAX_HIGHLIGHT) {
+            duration = MAX_HIGHLIGHT - total;
+        }
+
+        // Speed up filler, keep long fights normal
+        const speed = duration > 6 ? 1.5 : 1;
+
+        selectedSegments.push({ start: seg.start, duration, speed });
+        total += duration / speed; // account for speed-up
+    }
+
+    // --- Process each segment ---
+    const tempFiles = [];
+    for (let i = 0; i < selectedSegments.length; i++) {
+        const seg = selectedSegments[i];
         const tempPath = path.join(uploadDir, `seg_${i}_${Date.now()}.mp4`);
         const speedFilter = `setpts=${1 / seg.speed}*PTS`;
 
@@ -355,10 +361,10 @@ async function generateCinematicHighlight(videoPath, outputPath) {
         tempFiles.push(tempPath);
     }
 
-    // Merge segments with transitions
+    // --- Merge with transitions ---
     let finalMergedPath = await mergeSegmentsWithTransition(tempFiles, uploadDir);
 
-    // Add music if available
+    // --- Add background music ---
     let finalPath = finalMergedPath;
     const musicPath = pickRandomMusic();
     if (musicPath) {
@@ -378,40 +384,7 @@ async function generateCinematicHighlight(videoPath, outputPath) {
         finalPath = finalWithMusic;
     }
 
-    // Ensure final highlight is max 60s
-    const trimmedPath = path.join(uploadDir, `highlight_trimmed_${Date.now()}.mp4`);
-    await runFFmpegJob([
-        "-y",
-        "-i", finalPath,
-        "-t", "60",
-        "-c:v", "copy",
-        "-c:a", "copy",
-        trimmedPath
-    ]);
-    safeUnlink(finalPath);
-
-    // Safety pass if still > 60s
-    const finalDuration = await getVideoDuration(trimmedPath);
-    if (finalDuration > 60) {
-        const forceTrimmed = path.join(uploadDir, `highlight_forceTrim_${Date.now()}.mp4`);
-        await runFFmpegJob([
-            "-y",
-            "-i", trimmedPath,
-            "-ss", "0",
-            "-t", "60",
-            "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "23",
-            "-c:a", "aac",
-            "-b:a", "128k",
-            "-pix_fmt", "yuv420p",
-            forceTrimmed
-        ]);
-        safeUnlink(trimmedPath);
-        return forceTrimmed;
-    }
-
-    return trimmedPath;
+    return finalPath;
 }
 
 

@@ -5,6 +5,7 @@ const http = require("http");
 const { Server } = require("socket.io");
 const uploadRoutes = require("./routes/uploadRoutes");
 const eventRoutes = require("./routes/eventRoutes");
+const playfulRoutes = require("./routes/playfulRoutes");
 
 const app = express();
 const PORT = 3000;
@@ -17,6 +18,7 @@ app.use(express.json());
 app.use("/uploads", express.static("uploads"));
 app.use("/api/videos", uploadRoutes);
 app.use("/api/videos", eventRoutes);
+app.use("/api/videos", playfulRoutes);
 
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
