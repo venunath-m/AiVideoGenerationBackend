@@ -1,0 +1,6 @@
+diffusers
+transformers
+torch
+pillow
+opencv-python
+scenedetect
